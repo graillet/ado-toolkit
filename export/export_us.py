@@ -1,8 +1,21 @@
 import json
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 CONFIG_FILE = Path(__file__).with_name("config.json")
+FIELD_NAMES = [
+    "System.Id",
+    "System.WorkItemType",
+    "System.State",
+    "System.Title",
+    "System.AssignedTo",
+    "System.IterationPath",
+    "System.AreaPath",
+    "System.Description",
+    "Microsoft.VSTS.Common.AcceptanceCriteria",
+]
 
 
 def load_config(config_file=CONFIG_FILE):
@@ -22,16 +35,83 @@ def load_config(config_file=CONFIG_FILE):
 def run_az(command):
     result = subprocess.run(
         command,
-        shell=True,
         capture_output=True,
         text=True,
-        encoding="utf-8"
+        encoding="utf-8",
+        errors="replace"
     )
 
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
 
     return json.loads(result.stdout)
+
+
+def get_az_command():
+    command = shutil.which("az.cmd") or shutil.which("az")
+
+    if not command:
+        raise RuntimeError("Azure CLI was not found in PATH.")
+
+    return command
+
+
+def chunked(items, size):
+    for index in range(0, len(items), size):
+        yield items[index:index + size]
+
+
+def fetch_work_items(az_command, org_url, project, work_item_ids):
+    work_items = []
+
+    for work_item_id_chunk in chunked(work_item_ids, 200):
+        request = {
+            "ids": work_item_id_chunk,
+            "fields": FIELD_NAMES,
+            "errorPolicy": "Omit",
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".json",
+            delete=False
+        ) as file:
+            json.dump(request, file)
+            request_file = Path(file.name)
+
+        try:
+            response = run_az(
+                [
+                    az_command, "devops", "invoke",
+                    "--org", org_url,
+                    "--area", "wit",
+                    "--resource", "workitemsbatch",
+                    "--route-parameters", f"project={project}",
+                    "--http-method", "POST",
+                    "--api-version", "7.1",
+                    "--in-file", str(request_file),
+                    "-o", "json",
+                ]
+            )
+        finally:
+            request_file.unlink(missing_ok=True)
+
+        if isinstance(response, dict):
+            work_items.extend(response.get("value", []))
+        else:
+            work_items.extend(response)
+
+    return work_items
+
+
+def get_assigned_to(fields):
+    assigned_to = fields.get("System.AssignedTo")
+
+    if isinstance(assigned_to, dict):
+        return assigned_to.get("displayName")
+
+    return assigned_to
 
 
 def main():
@@ -41,47 +121,42 @@ def main():
     work_item_type = config["work_item_type"]
     output_file = Path(config["output_file"])
     org_url = f"https://dev.azure.com/{organization}"
+    az_command = get_az_command()
 
-    wiql = f"""
-    SELECT [System.Id]
-    FROM WorkItems
-    WHERE [System.TeamProject] = '{project}'
-    AND [System.WorkItemType] = '{work_item_type}'
-    ORDER BY [System.Id]
-    """
-
-    print(f"Getting {work_item_type}s...")
-
-    items = run_az(
-        f'az boards query '
-        f'--org "{org_url}" '
-        f'--project "{project}" '
-        f'--wiql "{wiql}" '
-        f'-o json'
+    wiql = (
+        "SELECT [System.Id] "
+        "FROM WorkItems "
+        f"WHERE [System.TeamProject] = '{project}' "
+        f"AND [System.WorkItemType] = '{work_item_type}' "
+        "ORDER BY [System.Id]"
     )
 
+    print(f"Getting work items of type {work_item_type}...")
+
+    items = run_az(
+        [
+            az_command, "boards", "query",
+            "--org", org_url,
+            "--project", project,
+            "--wiql", wiql,
+            "-o", "json"
+        ]
+    )
+
+    work_item_ids = [item["id"] for item in items]
+    print(f"Exporting {len(work_item_ids)} work items...")
+
+    work_items = fetch_work_items(az_command, org_url, project, work_item_ids)
+
     output = []
-
-    for item in items:
-        work_item_id = item["id"]
-        print(f"Exporting work item {work_item_id}...")
-
-        wi = run_az(
-            f'az boards work-item show '
-            f'--id {work_item_id} '
-            f'--org "{org_url}" '
-            f'--project "{project}" '
-            f'-o json'
-        )
-
-        fields = wi.get("fields", {})
-
+    for work_item in work_items:
+        fields = work_item.get("fields", {})
         output.append({
-            "id": wi.get("id"),
+            "id": work_item.get("id"),
             "type": fields.get("System.WorkItemType"),
             "state": fields.get("System.State"),
             "title": fields.get("System.Title"),
-            "assignedTo": fields.get("System.AssignedTo", {}).get("displayName"),
+            "assignedTo": get_assigned_to(fields),
             "iterationPath": fields.get("System.IterationPath"),
             "areaPath": fields.get("System.AreaPath"),
             "description": fields.get("System.Description"),
