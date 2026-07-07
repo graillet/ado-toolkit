@@ -2,11 +2,21 @@ import json
 import subprocess
 from pathlib import Path
 
-ORG = "NABusinessTechnology"
-PROJECT = "Ivy XPress Acceleration"
-OUTPUT_FILE = Path("ado_user_stories.json")
+CONFIG_FILE = Path(__file__).with_name("config.json")
 
-ORG_URL = f"https://dev.azure.com/{ORG}"
+
+def load_config(config_file=CONFIG_FILE):
+    with config_file.open(encoding="utf-8") as file:
+        config = json.load(file)
+
+    required_fields = ["organization", "project", "work_item_type", "output_file"]
+    missing_fields = [field for field in required_fields if not config.get(field)]
+
+    if missing_fields:
+        missing = ", ".join(missing_fields)
+        raise ValueError(f"Missing required config field(s): {missing}")
+
+    return config
 
 
 def run_az(command):
@@ -24,55 +34,67 @@ def run_az(command):
     return json.loads(result.stdout)
 
 
-wiql = f"""
-SELECT [System.Id]
-FROM WorkItems
-WHERE [System.TeamProject] = '{PROJECT}'
-AND [System.WorkItemType] = 'User Story'
-ORDER BY [System.Id]
-"""
+def main():
+    config = load_config()
+    organization = config["organization"]
+    project = config["project"]
+    work_item_type = config["work_item_type"]
+    output_file = Path(config["output_file"])
+    org_url = f"https://dev.azure.com/{organization}"
 
-print("Getting User Stories...")
+    wiql = f"""
+    SELECT [System.Id]
+    FROM WorkItems
+    WHERE [System.TeamProject] = '{project}'
+    AND [System.WorkItemType] = '{work_item_type}'
+    ORDER BY [System.Id]
+    """
 
-items = run_az(
-    f'az boards query '
-    f'--org "{ORG_URL}" '
-    f'--project "{PROJECT}" '
-    f'--wiql "{wiql}" '
-    f'-o json'
-)
+    print(f"Getting {work_item_type}s...")
 
-output = []
-
-for item in items:
-    work_item_id = item["id"]
-    print(f"Exporting US {work_item_id}...")
-
-    wi = run_az(
-        f'az boards work-item show '
-        f'--id {work_item_id} '
-        f'--org "{ORG_URL}" '
-        f'--project "{PROJECT}" '
+    items = run_az(
+        f'az boards query '
+        f'--org "{org_url}" '
+        f'--project "{project}" '
+        f'--wiql "{wiql}" '
         f'-o json'
     )
 
-    fields = wi.get("fields", {})
+    output = []
 
-    output.append({
-        "id": wi.get("id"),
-        "type": fields.get("System.WorkItemType"),
-        "state": fields.get("System.State"),
-        "title": fields.get("System.Title"),
-        "assignedTo": fields.get("System.AssignedTo", {}).get("displayName"),
-        "iterationPath": fields.get("System.IterationPath"),
-        "areaPath": fields.get("System.AreaPath"),
-        "description": fields.get("System.Description"),
-        "acceptanceCriteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria")
-    })
+    for item in items:
+        work_item_id = item["id"]
+        print(f"Exporting work item {work_item_id}...")
 
-OUTPUT_FILE.write_text(
-    json.dumps(output, indent=2, ensure_ascii=False),
-    encoding="utf-8"
-)
+        wi = run_az(
+            f'az boards work-item show '
+            f'--id {work_item_id} '
+            f'--org "{org_url}" '
+            f'--project "{project}" '
+            f'-o json'
+        )
 
-print(f"Done: {OUTPUT_FILE}")
+        fields = wi.get("fields", {})
+
+        output.append({
+            "id": wi.get("id"),
+            "type": fields.get("System.WorkItemType"),
+            "state": fields.get("System.State"),
+            "title": fields.get("System.Title"),
+            "assignedTo": fields.get("System.AssignedTo", {}).get("displayName"),
+            "iterationPath": fields.get("System.IterationPath"),
+            "areaPath": fields.get("System.AreaPath"),
+            "description": fields.get("System.Description"),
+            "acceptanceCriteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria")
+        })
+
+    output_file.write_text(
+        json.dumps(output, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+
+    print(f"Done: {output_file}")
+
+
+if __name__ == "__main__":
+    main()
