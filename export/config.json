@@ -2,5 +2,7 @@
   "organization": "NABusinessTechnology",
   "project": "Ivy XPress Acceleration",
   "work_item_type": "User Story",
+  "title_prefix": "Interface",
+  "include_discussions": true,
   "output_file": "ado_user_stories.json"
 }
