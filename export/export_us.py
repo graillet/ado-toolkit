@@ -1,4 +1,6 @@
+import argparse
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -160,12 +162,26 @@ def get_assigned_to(fields):
     return assigned_to
 
 
-def matches_title_prefix(work_item, title_prefix):
-    if not title_prefix:
+def title_matches_filter(work_item, title_filter):
+    if not title_filter:
         return True
 
     title = work_item.get("fields", {}).get("System.Title", "")
-    return title.casefold().startswith(title_prefix.casefold())
+    if not title:
+        return False
+
+    pattern = re.compile(title_filter, re.IGNORECASE)
+    return bool(pattern.search(title))
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Export Azure DevOps work items to JSON.")
+    parser.add_argument(
+        "--title-filter",
+        dest="title_filter",
+        help="Filter titles using a case-insensitive regular expression.",
+    )
+    return parser
 
 
 def build_work_item_link(org_url, project, work_item):
@@ -192,14 +208,60 @@ def build_output_item(org_url, project, work_item):
     }
 
 
+def build_markdown_output(items):
+    lines = ["# Azure DevOps Work Items", ""]
+
+    for item in items:
+        title = item.get("title") or "Untitled"
+        lines.extend([
+            f"## {item.get('id')}: {title}",
+            "",
+            f"- **Type:** {item.get('type') or ''}",
+            f"- **State:** {item.get('state') or ''}",
+            f"- **Assigned to:** {item.get('assignedTo') or ''}",
+            f"- **Iteration path:** {item.get('iterationPath') or ''}",
+            f"- **Area path:** {item.get('areaPath') or ''}",
+            f"- **Link:** [{item.get('link')}]({item.get('link')})",
+            "",
+        ])
+
+        for heading, field in (
+            ("Description", "description"),
+            ("Acceptance criteria", "acceptanceCriteria"),
+            ("Comments", "comments"),
+        ):
+            value = item.get(field)
+            if value:
+                lines.extend([f"### {heading}", "", str(value), ""])
+
+        discussions = item.get("discussion", [])
+        if discussions:
+            lines.extend(["### Discussion", ""])
+            for discussion in discussions:
+                author = discussion.get("addedBy") or "Unknown"
+                date = discussion.get("addedDate") or ""
+                text = discussion.get("discussion") or ""
+                lines.extend([
+                    f"#### {author} ({date})",
+                    "",
+                    text,
+                    "",
+                ])
+
+    return "\n".join(lines)
+
+
 def main():
+    args = build_parser().parse_args()
     config = load_config()
     organization = config["organization"]
     project = config["project"]
     work_item_type = config["work_item_type"]
-    title_prefix = config.get("title_prefix", "")
+    title_filter = args.title_filter or config.get("title_filter", "")
     include_discussions = config.get("include_discussions", False)
-    output_file = Path(config["output_file"])
+    output_filename = Path(config["output_file"]).name
+    output_file = Path(__file__).with_name("out") / output_filename
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     org_url = f"https://dev.azure.com/{organization}"
     az_command = get_az_command()
 
@@ -230,11 +292,11 @@ def main():
     work_items = [
         work_item
         for work_item in work_items
-        if matches_title_prefix(work_item, title_prefix)
+        if title_matches_filter(work_item, title_filter)
     ]
 
-    if title_prefix:
-        print(f"Matched {len(work_items)} work items with title prefix {title_prefix!r}.")
+    if title_filter:
+        print(f"Matched {len(work_items)} work items with title filter {title_filter!r}.")
 
     output = []
     for work_item in work_items:
@@ -251,10 +313,7 @@ def main():
 
         output.append(output_item)
 
-    output_file.write_text(
-        json.dumps(output, indent=2, ensure_ascii=False),
-        encoding="utf-8"
-    )
+    output_file.write_text(build_markdown_output(output), encoding="utf-8")
 
     print(f"Done: {output_file}")
 

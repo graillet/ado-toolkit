@@ -1,8 +1,8 @@
 {
   "organization": "NABusinessTechnology",
-  "project": "Ivy XPress Acceleration",
-  "work_item_type": "User Story",
-  "title_prefix": "Interface",
-  "include_discussions": true,
-  "output_file": "ado_user_stories.json"
+  "project": "BBU RISE",
+  "work_item_type": "Task",
+  "title_filter": ".*Design\\s*-\\s*ION.*",
+  "include_discussions": false,
+  "output_file": "ado_user_stories.md"
 }
