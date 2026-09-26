@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 CONFIG_FILE = Path(__file__).with_name("config.json")
 WORK_ITEM_QUERY_PAGE_SIZE = 1000
+WORK_ITEM_UPDATES_PAGE_SIZE = 200
 FIELD_NAMES = [
     "System.Id",
     "System.WorkItemType",
@@ -103,16 +104,25 @@ def fetch_work_items(az_command, org_url, project, work_item_ids):
             request_file.unlink(missing_ok=True)
 
         if isinstance(response, dict):
-            work_items.extend(response.get("value", []))
+            batch_items = response.get("value", [])
         else:
-            work_items.extend(response)
+            batch_items = response
+
+        returned_ids = {item["id"] for item in batch_items}
+        missing_ids = set(work_item_id_chunk) - returned_ids
+        if missing_ids:
+            raise RuntimeError(
+                "Export incomplete: Azure DevOps omitted work item IDs: "
+                + ", ".join(map(str, sorted(missing_ids)))
+            )
+        work_items.extend(batch_items)
 
     return work_items
 
 
 def fetch_discussion(az_command, org_url, project, work_item_id):
     discussion = []
-    continuation_token = None
+    skip = 0
 
     while True:
         command = [
@@ -122,14 +132,15 @@ def fetch_discussion(az_command, org_url, project, work_item_id):
             "--resource", "updates",
             "--route-parameters", f"project={project}", f"id={work_item_id}",
             "--api-version", "7.1",
+            "--query-parameters", f"$top={WORK_ITEM_UPDATES_PAGE_SIZE}", f"$skip={skip}",
             "-o", "json",
         ]
 
-        if continuation_token:
-            command.extend(["--query-parameters", f"continuationToken={continuation_token}"])
-
         response = run_az(command)
-        for update in response.get("value", []):
+        updates = response["value"]
+        if not updates:
+            break
+        for update in updates:
             fields = update.get("fields", {})
             history = fields.get("System.History", {})
             discussion_text = history.get("newValue")
@@ -146,10 +157,7 @@ def fetch_discussion(az_command, org_url, project, work_item_id):
                 "discussion": discussion_text
             })
 
-        continuation_token = response.get("continuation_token")
-
-        if not continuation_token:
-            break
+        skip += len(updates)
 
     return discussion
 
@@ -189,15 +197,31 @@ def fetch_work_item_ids(az_command, org_url, project, work_item_type):
             "ORDER BY [System.Id]"
         )
 
-        items = run_az(
-            [
-                az_command, "boards", "query",
-                "--org", org_url,
-                "--project", project,
-                "--wiql", wiql,
-                "-o", "json"
-            ]
-        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".json", delete=False
+        ) as file:
+            json.dump({"query": wiql}, file)
+            request_file = Path(file.name)
+
+        try:
+            response = run_az(
+                [
+                    az_command, "devops", "invoke",
+                    "--org", org_url,
+                    "--area", "wit",
+                    "--resource", "wiql",
+                    "--route-parameters", f"project={project}",
+                    "--http-method", "POST",
+                    "--api-version", "7.1",
+                    "--query-parameters", f"$top={WORK_ITEM_QUERY_PAGE_SIZE}",
+                    "--in-file", str(request_file),
+                    "-o", "json",
+                ]
+            )
+        finally:
+            request_file.unlink(missing_ok=True)
+
+        items = response["workItems"]
 
         if not items:
             break
@@ -205,14 +229,13 @@ def fetch_work_item_ids(az_command, org_url, project, work_item_type):
         page_ids = [item["id"] for item in items]
         work_item_ids.extend(page_ids)
 
-        if len(page_ids) < WORK_ITEM_QUERY_PAGE_SIZE:
-            break
-
         next_last_id = page_ids[-1]
-        if next_last_id <= last_id:
+        if any(current <= previous for previous, current in zip([last_id] + page_ids, page_ids)):
             raise RuntimeError("Azure DevOps returned a non-advancing work item page.")
 
         last_id = next_last_id
+        if len(page_ids) < WORK_ITEM_QUERY_PAGE_SIZE:
+            break
 
     return work_item_ids
 
@@ -222,7 +245,7 @@ def build_parser():
     parser.add_argument(
         "--title-filter",
         dest="title_filter",
-        help="Filter titles using a case-insensitive regular expression.",
+        help="Filter titles using a case-insensitive regular expression; an empty string disables filtering.",
     )
     return parser
 
@@ -300,7 +323,9 @@ def main():
     organization = config["organization"]
     project = config["project"]
     work_item_type = config["work_item_type"]
-    title_filter = args.title_filter or config.get("title_filter", "")
+    title_filter = (
+        args.title_filter if args.title_filter is not None else config.get("title_filter", "")
+    )
     include_discussions = config.get("include_discussions", False)
     output_filename = Path(config["output_file"]).name
     output_file = Path(__file__).with_name("out") / output_filename
