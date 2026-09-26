@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 CONFIG_FILE = Path(__file__).with_name("config.json")
+WORK_ITEM_QUERY_PAGE_SIZE = 1000
 FIELD_NAMES = [
     "System.Id",
     "System.WorkItemType",
@@ -174,6 +175,48 @@ def title_matches_filter(work_item, title_filter):
     return bool(pattern.search(title))
 
 
+def fetch_work_item_ids(az_command, org_url, project, work_item_type):
+    work_item_ids = []
+    last_id = 0
+
+    while True:
+        wiql = (
+            "SELECT [System.Id] "
+            "FROM WorkItems "
+            f"WHERE [System.TeamProject] = '{project}' "
+            f"AND [System.WorkItemType] = '{work_item_type}' "
+            f"AND [System.Id] > {last_id} "
+            "ORDER BY [System.Id]"
+        )
+
+        items = run_az(
+            [
+                az_command, "boards", "query",
+                "--org", org_url,
+                "--project", project,
+                "--wiql", wiql,
+                "-o", "json"
+            ]
+        )
+
+        if not items:
+            break
+
+        page_ids = [item["id"] for item in items]
+        work_item_ids.extend(page_ids)
+
+        if len(page_ids) < WORK_ITEM_QUERY_PAGE_SIZE:
+            break
+
+        next_last_id = page_ids[-1]
+        if next_last_id <= last_id:
+            raise RuntimeError("Azure DevOps returned a non-advancing work item page.")
+
+        last_id = next_last_id
+
+    return work_item_ids
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Export Azure DevOps work items to JSON.")
     parser.add_argument(
@@ -265,27 +308,14 @@ def main():
     org_url = f"https://dev.azure.com/{organization}"
     az_command = get_az_command()
 
-    wiql = (
-        "SELECT [System.Id] "
-        "FROM WorkItems "
-        f"WHERE [System.TeamProject] = '{project}' "
-        f"AND [System.WorkItemType] = '{work_item_type}' "
-        "ORDER BY [System.Id]"
-    )
-
     print(f"Getting work items of type {work_item_type}...")
 
-    items = run_az(
-        [
-            az_command, "boards", "query",
-            "--org", org_url,
-            "--project", project,
-            "--wiql", wiql,
-            "-o", "json"
-        ]
+    work_item_ids = fetch_work_item_ids(
+        az_command,
+        org_url,
+        project,
+        work_item_type
     )
-
-    work_item_ids = [item["id"] for item in items]
     print(f"Exporting {len(work_item_ids)} work items...")
 
     work_items = fetch_work_items(az_command, org_url, project, work_item_ids)
