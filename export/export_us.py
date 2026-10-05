@@ -184,6 +184,19 @@ def title_matches_filter(work_item, title_filter):
     return bool(pattern.search(title))
 
 
+def parse_excluded_sprints(value):
+    """Parse pipe-separated sprint names, ignoring case and surrounding spaces."""
+    if not isinstance(value, str):
+        raise ValueError("exclude_sprints must be a string of sprint names separated by '|'.")
+    return {name.strip().casefold() for name in value.split("|") if name.strip()}
+
+
+def sprint_is_excluded(work_item, excluded_sprints):
+    iteration_path = work_item.get("fields", {}).get("System.IterationPath") or ""
+    sprint_name = iteration_path.rsplit("\\", 1)[-1]
+    return sprint_name.casefold() in excluded_sprints
+
+
 def fetch_work_item_ids(az_command, org_url, project, work_item_type):
     work_item_ids = []
     last_id = 0
@@ -242,7 +255,7 @@ def fetch_work_item_ids(az_command, org_url, project, work_item_type):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Export Azure DevOps work items to JSON.")
+    parser = argparse.ArgumentParser(description="Export Azure DevOps work items to Markdown.")
     parser.add_argument(
         "--title-filter",
         dest="title_filter",
@@ -330,6 +343,7 @@ def main():
         args.title_filter if args.title_filter is not None else config.get("title_filter", "")
     )
     include_discussions = config.get("include_discussions", False)
+    excluded_sprints = parse_excluded_sprints(config.get("exclude_sprints", ""))
     output_filename = Path(config["output_file"]).name
     output_file = Path(__file__).with_name("out") / output_filename
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -355,6 +369,13 @@ def main():
 
     if title_filter:
         print(f"Matched {len(work_items)} work items with title filter {title_filter!r}.")
+
+    if excluded_sprints:
+        previous_count = len(work_items)
+        work_items = [
+            item for item in work_items if not sprint_is_excluded(item, excluded_sprints)
+        ]
+        print(f"Excluded {previous_count - len(work_items)} work items by sprint.")
 
     output = []
     for work_item in work_items:

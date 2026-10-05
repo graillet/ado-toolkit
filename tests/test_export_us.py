@@ -13,6 +13,46 @@ spec.loader.exec_module(export)
 
 
 class ExportTests(unittest.TestCase):
+    def test_sprint_exclusions_use_exact_names(self):
+        excluded = export.parse_excluded_sprints(" Sprint 1 | SPRINT 2 || ")
+        for path, expected in [
+            ("Project\\Release\\sprint 1", True),
+            ("Project\\Sprint 2", True),
+            ("Project\\Sprint 10", False),
+            ("Project\\Sprint 1\\Child", False),
+            (None, False),
+        ]:
+            with self.subTest(path=path):
+                item = {"fields": {"System.IterationPath": path}}
+                self.assertEqual(export.sprint_is_excluded(item, excluded), expected)
+        self.assertEqual(export.parse_excluded_sprints(" | "), set())
+        with self.assertRaisesRegex(ValueError, "exclude_sprints"):
+            export.parse_excluded_sprints(["Sprint 1"])
+
+    def test_excluded_sprints_are_not_exported_or_fetched_for_discussion(self):
+        config = dict(organization="org", project="project", work_item_type="Task",
+                      output_file="test.md", exclude_sprints="Sprint 1|Sprint 2",
+                      include_discussions=True)
+        items = [
+            {"id": i, "fields": {"System.Title": f"Task {i}",
+                                  "System.IterationPath": f"Project\\Sprint {i}"}}
+            for i in range(1, 4)
+        ]
+        with patch("sys.argv", ["export_us.py"]), \
+             patch.object(export, "load_config", return_value=config), \
+             patch.object(export, "get_az_command", return_value="az"), \
+             patch.object(export, "fetch_work_item_ids", return_value=[1, 2, 3]), \
+             patch.object(export, "fetch_work_items", return_value=items), \
+             patch.object(export, "fetch_discussion", return_value=[]) as discussion, \
+             patch.object(Path, "mkdir"), patch.object(Path, "write_text") as write, \
+             patch("builtins.print"):
+            export.main()
+        markdown = write.call_args.args[0]
+        self.assertNotIn("Task 1", markdown)
+        self.assertNotIn("Task 2", markdown)
+        self.assertIn("Task 3", markdown)
+        discussion.assert_called_once_with("az", "https://dev.azure.com/org", "project", 3)
+
     def test_ten_thousand_items_and_temporary_file_cleanup(self):
         ids = list(range(2, 20001, 2))
         request_files = []
