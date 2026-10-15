@@ -184,17 +184,25 @@ def title_matches_filter(work_item, title_filter):
     return bool(pattern.search(title))
 
 
-def parse_excluded_sprints(value):
+def parse_sprints(value, field_name):
     """Parse pipe-separated sprint names, ignoring case and surrounding spaces."""
     if not isinstance(value, str):
-        raise ValueError("exclude_sprints must be a string of sprint names separated by '|'.")
+        raise ValueError(f"{field_name} must be a string of sprint names separated by '|'.")
     return {name.strip().casefold() for name in value.split("|") if name.strip()}
 
 
-def sprint_is_excluded(work_item, excluded_sprints):
+def parse_excluded_sprints(value):
+    return parse_sprints(value, "exclude_sprints")
+
+
+def sprint_matches(work_item, sprints):
     iteration_path = work_item.get("fields", {}).get("System.IterationPath") or ""
     sprint_name = iteration_path.rsplit("\\", 1)[-1]
-    return sprint_name.casefold() in excluded_sprints
+    return sprint_name.casefold() in sprints
+
+
+def sprint_is_excluded(work_item, excluded_sprints):
+    return sprint_matches(work_item, excluded_sprints)
 
 
 def fetch_work_item_ids(az_command, org_url, project, work_item_type):
@@ -344,6 +352,7 @@ def main():
     )
     include_discussions = config.get("include_discussions", False)
     excluded_sprints = parse_excluded_sprints(config.get("exclude_sprints", ""))
+    included_sprints = parse_sprints(config.get("include_sprints", ""), "include_sprints")
     output_filename = Path(config["output_file"]).name
     output_file = Path(__file__).with_name("out") / output_filename
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -369,6 +378,12 @@ def main():
 
     if title_filter:
         print(f"Matched {len(work_items)} work items with title filter {title_filter!r}.")
+
+    if included_sprints:
+        work_items = [
+            item for item in work_items if sprint_matches(item, included_sprints)
+        ]
+        print(f"Matched {len(work_items)} work items with included sprints.")
 
     if excluded_sprints:
         previous_count = len(work_items)

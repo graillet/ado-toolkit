@@ -61,6 +61,18 @@ El filtro busca una coincidencia en cualquier parte del título. Por ejemplo:
 
 En este campo, `|` es un operador de expresión regular. No es necesario agregar `(?i)` porque el script ya ignora mayúsculas. Si una expresión usa barras invertidas, deben escaparse en JSON: por ejemplo, `"\\bdesign\\b"`.
 
+### Incluir sprints
+
+Para exportar solo ciertos sprints, agrega a `config.json`:
+
+```json
+"include_sprints": "Sprint 1 | Sprint 2"
+```
+
+Compara el nombre exacto del sprint (el último segmento de `System.IterationPath`), sin distinguir mayúsculas e ignorando espacios alrededor de los nombres. No compara rutas completas ni incluye descendientes. Los elementos sin ruta no coinciden.
+
+Si se omite o vale `""`, permite todos los sprints. Debe ser una cadena, no una lista ni `null`. Se combina con el filtro de títulos y con `exclude_sprints`; si un sprint aparece en ambas listas, queda excluido. Se aplica antes de consultar discusiones.
+
 ### Exclusión de sprints
 
 ```json
