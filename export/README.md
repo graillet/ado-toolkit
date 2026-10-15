@@ -51,6 +51,26 @@ Ejemplo para exportar historias de usuario:
 
 Usa booleanos JSON sin comillas y evita comas finales o comentarios en el archivo.
 
+### Campos exportados
+
+Siempre se descargan todos los campos que ADO devuelve para cada item, incluidos los personalizados. No se necesita `include_all_fields`; si una configuración antigua lo contiene, se ignora.
+
+Los campos se presentan juntos como viñetas debajo del título: primero los habituales y luego los demás, ordenados por nombre interno. Por ejemplo:
+
+```markdown
+- **State:** Active
+- **Custom.Analyst:** ana@example.com
+- **Custom.ProgressPercentage:** 0
+```
+
+No se repiten los campos ya representados en el encabezado o en las secciones de descripción, criterios de aceptación y comentarios. Tampoco hay una sección separada de campos adicionales. `System.History` se excluye siempre de las viñetas; sus entradas se consultan para la sección `Discussion` únicamente cuando `include_discussions` es `true`.
+
+Los objetos con `uniqueName` se muestran solo con ese valor, incluso dentro de listas y objetos anidados. Los objetos sin `uniqueName` y las listas se representan como JSON compacto en la misma viñeta. Los valores `0`, `false`, `null` y las cadenas vacías (`""`) se conservan. Los textos de estos campos se escapan para Markdown y los saltos de línea continúan dentro de la misma viñeta. Assigned to conserva su formato habitual.
+
+Se incluyen los campos presentes en la respuesta de cada item; los items pueden tener campos distintos. Las relaciones y los adjuntos no forman parte de estos campos. El historial de discusiones sigue dependiendo de `include_discussions`. Para actualizar un archivo ya generado, vuelve a ejecutar el exportador.
+
+Referencia de la consulta: [Work Items - Get Work Items Batch](https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/get-work-items-batch?view=azure-devops-rest-7.1).
+
 ### Filtro de títulos
 
 El filtro busca una coincidencia en cualquier parte del título. Por ejemplo:

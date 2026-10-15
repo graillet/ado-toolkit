@@ -10,7 +10,7 @@ from urllib.parse import quote
 CONFIG_FILE = Path(__file__).with_name("config.json")
 WORK_ITEM_QUERY_PAGE_SIZE = 1000
 WORK_ITEM_UPDATES_PAGE_SIZE = 200
-FIELD_NAMES = [
+SUMMARY_FIELD_NAMES = [
     "System.Id",
     "System.WorkItemType",
     "System.State",
@@ -74,7 +74,6 @@ def fetch_work_items(az_command, org_url, project, work_item_ids):
     for work_item_id_chunk in chunked(work_item_ids, 200):
         request = {
             "ids": work_item_id_chunk,
-            "fields": FIELD_NAMES,
             "errorPolicy": "Omit",
         }
 
@@ -280,7 +279,7 @@ def build_work_item_link(org_url, project, work_item):
 
 def build_output_item(org_url, project, work_item):
     fields = work_item.get("fields", {})
-    return {
+    output_item = {
         "id": work_item.get("id"),
         "link-json": work_item.get("url"),
         "link": build_work_item_link(org_url, project, work_item),
@@ -293,8 +292,39 @@ def build_output_item(org_url, project, work_item):
         "areaPath": fields.get("System.AreaPath"),
         "description": fields.get("System.Description"),
         "comments": fields.get("Microsoft.VSTS.CMMI.Comments"),
-        "acceptanceCriteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria")
+        "acceptanceCriteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria"),
+        "additionalFields": build_additional_fields(fields),
     }
+    return output_item
+
+
+def simplify_field_value(value):
+    if isinstance(value, dict):
+        if "uniqueName" in value:
+            return value["uniqueName"]
+        return {key: simplify_field_value(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [simplify_field_value(nested) for nested in value]
+    return value
+
+
+def build_additional_fields(fields):
+    return {
+        name: simplify_field_value(value)
+        for name, value in fields.items()
+        if name not in SUMMARY_FIELD_NAMES and name != "System.History"
+    }
+
+
+def format_field_value(value):
+    text = value if isinstance(value, str) and value else json.dumps(value, ensure_ascii=False)
+    # Escape Markdown syntax so field contents stay inside their list item.
+    text = re.sub(r"([\\`*_\[\]<>#!|~])", r"\\\1", text)
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "  \n  ")
+
+
+def build_field_lines(fields):
+    return [f"- **{name}:** {format_field_value(value)}" for name, value in sorted(fields.items())]
 
 
 def build_markdown_output(items):
@@ -312,6 +342,7 @@ def build_markdown_output(items):
             f"- **Iteration path:** {item.get('iterationPath') or ''}",
             f"- **Area path:** {item.get('areaPath') or ''}",
             f"- **Link:** [{item.get('link')}]({item.get('link')})",
+            *build_field_lines(item.get("additionalFields", {})),
             "",
         ])
 
@@ -369,7 +400,9 @@ def main():
     )
     print(f"Exporting {len(work_item_ids)} work items...")
 
-    work_items = fetch_work_items(az_command, org_url, project, work_item_ids)
+    work_items = fetch_work_items(
+        az_command, org_url, project, work_item_ids
+    )
     work_items = [
         work_item
         for work_item in work_items
@@ -394,7 +427,9 @@ def main():
 
     output = []
     for work_item in work_items:
-        output_item = build_output_item(org_url, project, work_item)
+        output_item = build_output_item(
+            org_url, project, work_item
+        )
 
         if include_discussions:
             print(f"Exporting discussion for work item {work_item['id']}...")

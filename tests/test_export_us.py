@@ -13,6 +13,89 @@ spec.loader.exec_module(export)
 
 
 class ExportTests(unittest.TestCase):
+    def test_all_fields_are_always_requested_and_rendered_below_title(self):
+        items = [
+            {"id": 1, "fields": {
+                "System.Title": "Task 1", "System.Description": "Unique description text",
+                "System.History": "Latest discussion entry",
+                "Custom.Analyst": {"uniqueName": "ana@example.com", "imageUrl": "avatar-url"},
+                "Custom.ProgressPercentage": 0, "Custom.Enabled": False,
+                "Custom.Empty": "", "Custom.Null": None,
+            }},
+            {"id": 2, "fields": {"System.Title": "Task 2", "Custom.Other": "Other value"}},
+        ]
+        # Old configurations cannot disable the new always-on behavior.
+        for legacy_mode in [None, False, True]:
+            config = dict(organization="org", project="project", work_item_type="Task",
+                          output_file="test.md")
+            if legacy_mode is not None:
+                config["include_all_fields"] = legacy_mode
+
+            def respond(command):
+                request = json.loads(Path(command[command.index("--in-file") + 1])
+                                     .read_text(encoding="utf-8"))
+                self.assertEqual(request["ids"], [1, 2])
+                self.assertNotIn("fields", request)
+                return {"value": items}
+
+            with self.subTest(legacy_mode=legacy_mode), \
+                 patch("sys.argv", ["export_us.py"]), \
+                 patch.object(export, "load_config", return_value=config), \
+                 patch.object(export, "get_az_command", return_value="az"), \
+                 patch.object(export, "fetch_work_item_ids", return_value=[1, 2]), \
+                 patch.object(export, "run_az", side_effect=respond), \
+                 patch.object(export, "fetch_discussion") as discussion, \
+                 patch.object(Path, "mkdir"), patch.object(Path, "write_text") as write, \
+                 patch("builtins.print"):
+                export.main()
+            markdown = write.call_args.args[0]
+            discussion.assert_not_called()
+            self.assertIn("## 1: Task 1", markdown)
+            self.assertIn("## 2: Task 2", markdown)
+            for line in ["- **Custom.Analyst:** ana@example.com",
+                         "- **Custom.ProgressPercentage:** 0", "- **Custom.Enabled:** false",
+                         '- **Custom.Empty:** ""', "- **Custom.Null:** null",
+                         "- **Custom.Other:** Other value"]:
+                self.assertEqual(markdown.count(line), 1)
+            self.assertLess(markdown.index("- **Custom.ProgressPercentage:**"),
+                            markdown.index("### Description"))
+            self.assertGreater(markdown.index("- **Custom.Other:**"), markdown.index("## 2:"))
+            self.assertEqual(markdown.count("Unique description text"), 1)
+            self.assertNotIn("System.Description", markdown)
+            self.assertNotIn("System.History", markdown)
+            self.assertNotIn("Latest discussion entry", markdown)
+            self.assertNotIn("avatar-url", markdown)
+            self.assertNotIn("### Additional fields", markdown)
+            self.assertNotIn("```json", markdown)
+
+    def test_multiline_values_remain_in_their_bullet(self):
+        value = "First line\n# Heading\n```json\nLast line"
+        rendered = export.build_field_lines({"Custom.Notes": value})[0]
+        self.assertTrue(rendered.startswith("- **Custom.Notes:** First line"))
+        self.assertTrue(all(line.startswith("  ") for line in rendered.splitlines()[1:]))
+        self.assertNotIn("```", rendered)
+        self.assertEqual(export.format_field_value({"count": 0}), '{"count": 0}')
+
+    def test_additional_fields_preserve_other_objects_without_mutating_source(self):
+        fields = {"System.Title": "Task", "Custom.Reviewers": [
+            {"displayName": "Ana", "uniqueName": "ana@example.com"}],
+            "Custom.Data": {"count": 0, "enabled": False},
+            "Custom.UnknownIdentity": {"displayName": "Unknown", "id": "123"}}
+        original = json.loads(json.dumps(fields))
+        self.assertEqual(export.build_additional_fields(fields), {
+            "Custom.Reviewers": ["ana@example.com"],
+            "Custom.Data": {"count": 0, "enabled": False},
+            "Custom.UnknownIdentity": {"displayName": "Unknown", "id": "123"}})
+        self.assertEqual(fields, original)
+
+    def test_no_additional_section_when_only_standard_fields_exist(self):
+        item = export.build_output_item("org", "project", {
+            "id": 1, "fields": {"System.Title": "Task", "System.Description": "Description text"}
+        })
+        markdown = export.build_markdown_output([item])
+        self.assertNotIn("### Additional fields", markdown)
+        self.assertEqual(markdown.count("Description text"), 1)
+
     def test_sprint_exclusions_use_exact_names(self):
         excluded = export.parse_excluded_sprints(" Sprint 1 | SPRINT 2 || ")
         for path, expected in [
