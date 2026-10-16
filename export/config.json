@@ -2,9 +2,12 @@
   "organization": "NABusinessTechnology",
   "project": "BBU RISE",
   "work_item_type": "Task",
-  "title_filter": "(?i).*\\bDesign - Ivy OSE Interface\\b.*",
+  "title_filter": "(?i).*\\bDesign\\b.*",
   "include_discussions": false,
   "convert_html_to_markdown": true,
-  "include_sprints": "Sprint ION - OSE",
-  "output_file": "BBU_RISE_OSE_Design_Tasks.md"
+  "exclude_sprints": "Sprint Inactive",
+  "filters": [
+    {"field": "Custom.ProgressPercentage", "operator": "eq", "value": 100}
+  ],
+  "output_file": "BBU_RISE_Design_Tasks_All_100.md"
 }

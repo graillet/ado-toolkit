@@ -43,6 +43,7 @@ Ejemplo para exportar historias de usuario:
   "project": "BBU RISE",
   "work_item_type": "User Story",
   "title_filter": "",
+  "filters": [],
   "exclude_sprints": "Inactive|Sprint 1|Sprint 2",
   "include_discussions": false,
   "convert_html_to_markdown": false,
@@ -60,8 +61,62 @@ Ejemplo para exportar historias de usuario:
 | `exclude_sprints` | No | Cadena de nombres de sprint separados por `\|`. Ausente o `""` no excluye ninguno. No acepta un arreglo JSON ni `null`. |
 | `include_discussions` | No | Booleano `true` o `false`. Si se omite, se usa `false`. Activa la consulta del historial de discusiones de los elementos que pasan los filtros. |
 | `convert_html_to_markdown` | No | Booleano `true` o `false`. Por defecto `false`. Convierte Description, Acceptance criteria, Comments y Discussion a Markdown con `markdownify`. |
+| `filters` | No | Lista de criterios por nombre interno de campo. Todos deben cumplirse (AND). Ausente o `[]` desactiva estos criterios. |
 
 Usa booleanos JSON sin comillas y evita comas finales o comentarios en el archivo.
+
+### Filtros genéricos por campo
+
+Agrega criterios a `filters` en `config.json`. Por ejemplo, para exportar items activos o nuevos asignados al analista indicado y con progreso igual a cero:
+
+```json
+"filters": [
+  {"field": "System.State", "operator": "in", "value": ["Active", "New"]},
+  {"field": "Custom.Analyst", "operator": "eq", "value": "ana@example.com"},
+  {"field": "Custom.ProgressPercentage", "operator": "eq", "value": 0}
+]
+```
+
+Reemplaza los nombres y valores por los de tu proyecto. `field` es el nombre interno exacto que aparece en la exportación (por ejemplo, `System.State`), no la etiqueta visible de ADO. Los nombres de campo distinguen mayúsculas; se ignoran espacios alrededor del nombre configurado. Un nombre inexistente se trata como campo ausente, sin consultar el catálogo del proyecto.
+
+| Operador | Significado | `value` |
+| --- | --- | --- |
+| `eq` | Igual al valor | Texto, número, booleano o `null` |
+| `ne` | Diferente del valor | Texto, número, booleano o `null` |
+| `in` | Igual a cualquiera de los valores | Lista no vacía de valores simples |
+| `not_in` | Diferente de todos los valores | Lista no vacía de valores simples |
+| `contains` | El texto contiene una subcadena literal, no una regex | Texto |
+| `exists` | El campo está presente, aunque sea vacío o `null` | No se permite `value` |
+| `not_exists` | El campo está ausente | No se permite `value` |
+| `is_empty` | Ausente, `null`, cadena vacía o solo espacios | No se permite `value` |
+
+Todos los criterios se combinan con **AND**, también con `title_filter`, `include_sprints` y `exclude_sprints`. Usa `in` para aceptar alternativas en un mismo campo; no hay grupos OR entre campos. Se aplican a los valores descargados antes de convertir HTML y antes de consultar discusiones. No reducen la descarga inicial.
+
+Las comparaciones de texto ignoran mayúsculas por defecto. Puedes exigir coincidencia de mayúsculas por criterio:
+
+```json
+{"field": "Custom.Code", "operator": "eq", "value": "OSE", "case_sensitive": true}
+```
+
+Se conservan los tipos: `0` es diferente de `"0"` y de `false`; `0` y `0.0` son numéricamente iguales. Los valores de texto no se recortan. `contains` solo opera sobre texto; una cadena vacía coincide con cualquier texto. En campos de identidad como `Custom.Analyst` o `System.AssignedTo`, las comparaciones usan `uniqueName` (normalmente correo), no `displayName`. Los objetos sin `uniqueName` y las listas no coinciden con operadores de comparación; sí pueden consultarse con los operadores de presencia.
+
+Si el campo **no existe** en un item, no coincide con `eq`, `ne`, `in`, `not_in` ni `contains`. Solo `not_exists` e `is_empty` aceptan esa ausencia. Un campo presente con `null` puede coincidir con `eq` y `value: null`. `0` y `false` no se consideran vacíos.
+
+Ejemplos independientes:
+
+```json
+{"field": "System.Tags", "operator": "contains", "value": "OSE"}
+```
+
+```json
+{"field": "Custom.Analyst", "operator": "not_exists"}
+```
+
+```json
+{"field": "Custom.Approval", "operator": "is_empty"}
+```
+
+Cada ejemplo es un criterio que va dentro de la lista `filters`. Para desactivar todos estos filtros usa `"filters": []`. No se aceptan `null`, objetos en lugar de listas, operadores desconocidos ni valores incompatibles. Los errores indican el índice, por ejemplo `filters[0]`, y detienen la ejecución antes de consultar ADO o escribir la salida. Si ningún item cumple, se genera solo el encabezado general.
 
 ### Convertir HTML a Markdown
 
@@ -189,7 +244,7 @@ Si no hay coincidencias, se genera un archivo que contiene únicamente el encabe
 1. Lee la configuración y los argumentos de consola.
 2. Consulta los IDs del proyecto y tipo elegidos, en páginas de hasta 1,000 elementos ordenados por ID ascendente.
 3. Descarga los campos de esos elementos en lotes de hasta 200.
-4. Aplica el filtro de títulos y después la exclusión de sprints localmente.
+4. Aplica localmente el filtro de títulos, la inclusión y exclusión de sprints y los criterios de `filters`.
 5. Si se habilitaron discusiones, consulta las actualizaciones de cada elemento restante en páginas de 200 y extrae los valores nuevos de `System.History`.
 6. Construye y escribe el Markdown, conservando el orden recibido de los lotes de elementos.
 
@@ -204,6 +259,8 @@ Los archivos JSON temporales usados para las solicitudes se eliminan al terminar
 | `Azure CLI was not found in PATH.` | Instalación de Azure CLI y disponibilidad de `az` o `az.cmd` en la terminal actual. |
 | Error de `az devops` | Extensión `azure-devops`, autenticación, permisos y nombres de organización/proyecto. El script propaga el error de la CLI. |
 | `Missing required config field(s)` | Campos obligatorios ausentes o vacíos en `config.json`. |
+| Un filtro numérico no encuentra coincidencias | Revisa el tipo de `value`: para `Custom.ProgressPercentage` usa `100` sin comillas, no `"100"`. Los filtros no convierten textos en números. |
+| `HTML conversion requires markdownify` y el Markdown conserva items anteriores | Ejecuta con `.\.venv\Scripts\python.exe export/export_us.py` si instalaste las dependencias en `.venv`, o instálalas en el intérprete que utilizas. La ejecución se detiene antes de actualizar el archivo. |
 | Error al leer JSON | Sintaxis y codificación UTF-8 de `config.json`. |
 | `exclude_sprints must be a string...` | Usa una cadena separada por `\|`, no una lista ni `null`. |
 | Error de expresión regular | Sintaxis de `title_filter` y escape de barras invertidas en JSON. |

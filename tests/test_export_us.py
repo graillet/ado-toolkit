@@ -13,6 +13,99 @@ spec.loader.exec_module(export)
 
 
 class ExportTests(unittest.TestCase):
+    def test_generic_field_filter_operators_and_types(self):
+        fields = {"System.State": "Active", "Custom.Number": 0, "Custom.Flag": False,
+                  "Custom.Empty": "  ", "Custom.Null": None,
+                  "Custom.Analyst": {"uniqueName": "ana@example.com", "displayName": "Ana"},
+                  "Custom.List": ["A"], "Custom.Object": {"name": "A"}}
+        cases = [
+            ("System.State", "eq", "active", True),
+            ("System.State", "ne", "Closed", True),
+            ("System.State", "in", ["New", "ACTIVE"], True),
+            ("System.State", "not_in", ["Active"], False),
+            ("System.State", "contains", "CTI", True),
+            ("Custom.Analyst", "eq", "ANA@example.com", True),
+            ("Custom.Analyst", "eq", "Ana", False),
+            ("Custom.Number", "eq", 0.0, True),
+            ("Custom.Number", "eq", "0", False),
+            ("Custom.Flag", "eq", 0, False),
+            ("Custom.Flag", "in", [0], False),
+            ("Custom.Flag", "eq", False, True),
+            ("Custom.Number", "contains", "0", False),
+            ("Custom.Null", "eq", None, True),
+            ("Custom.List", "ne", "A", False),
+            ("Custom.Object", "not_in", ["B"], False),
+        ]
+        for name, operator, value, expected in cases:
+            rule = dict(field=name, operator=operator, value=value)
+            with self.subTest(rule=rule):
+                export.validate_filters([rule])
+                self.assertEqual(export.matches_field_filter(fields, rule), expected)
+        self.assertFalse(export.matches_field_filter(fields, dict(
+            field="System.State", operator="eq", value="active", case_sensitive=True)))
+        for operator in ["eq", "ne", "in", "not_in", "contains"]:
+            rule = dict(field="Missing", operator=operator,
+                        value=["A"] if operator in ["in", "not_in"] else "A")
+            self.assertFalse(export.matches_field_filter(fields, rule))
+        for name, exists, empty in [("Missing", False, True), ("Custom.Empty", True, True),
+                                    ("Custom.Null", True, True), ("Custom.Number", True, False),
+                                    ("Custom.Flag", True, False)]:
+            for operator, expected in [("exists", exists), ("not_exists", not exists),
+                                       ("is_empty", empty)]:
+                self.assertEqual(export.matches_field_filter(fields, dict(
+                    field=name, operator=operator)), expected)
+
+    def test_invalid_generic_filters_fail_before_azure_requests(self):
+        invalid = [None, {}, [None], [{}], [dict(field=" ", operator="exists")],
+                   [dict(field="X", operator="unknown")],
+                   [dict(field="X", operator="eq")],
+                   [dict(field="X", operator="in", value="A")],
+                   [dict(field="X", operator="not_in", value=[])],
+                   [dict(field="X", operator="contains", value=1)],
+                   [dict(field="X", operator="eq", value={})],
+                   [dict(field="X", operator="in", value=[{}])],
+                   [dict(field="X", operator="exists", value=True)],
+                   [dict(field="X", operator="exists", case_sensitive="false")],
+                   [dict(field="X", operator="exists", typo=True)]]
+        for filters in invalid:
+            config = dict(organization="org", project="project", work_item_type="Task",
+                          output_file="test.md", filters=filters)
+            with self.subTest(filters=filters), patch("sys.argv", ["export_us.py"]), \
+                 patch.object(export, "load_config", return_value=config), \
+                 patch.object(export, "get_az_command") as az, patch.object(Path, "mkdir") as mkdir:
+                with self.assertRaisesRegex(ValueError, "filters"):
+                    export.main()
+                az.assert_not_called()
+                mkdir.assert_not_called()
+
+    def test_generic_filters_combine_with_title_and_sprints_before_discussions(self):
+        config = dict(organization="org", project="project", work_item_type="Task",
+                      output_file="test.md", title_filter="Design", include_sprints="Sprint 1|Sprint 2",
+                      exclude_sprints="Sprint 2", include_discussions=True,
+                      filters=[dict(field="System.State", operator="in", value=["Active", "New"]),
+                               dict(field="Custom.Analyst", operator="eq", value="ana@example.com")])
+        items = [{"id": i, "fields": {"System.Title": "Design " + str(i),
+                  "System.State": "Active", "Custom.Analyst": {"uniqueName": "ana@example.com"},
+                  "System.IterationPath": "Project\\Sprint 1"}} for i in range(1, 7)]
+        items[1]["fields"]["System.State"] = "Closed"
+        items[2]["fields"].pop("Custom.Analyst")
+        items[3]["fields"]["System.Title"] = "Other"
+        items[4]["fields"]["System.IterationPath"] = "Project\\Sprint 2"
+        items[5]["fields"]["System.IterationPath"] = "Project\\Sprint 3"
+        with patch("sys.argv", ["export_us.py"]), \
+             patch.object(export, "load_config", return_value=config), \
+             patch.object(export, "get_az_command", return_value="az"), \
+             patch.object(export, "fetch_work_item_ids", return_value=list(range(1, 7))), \
+             patch.object(export, "fetch_work_items", return_value=items), \
+             patch.object(export, "fetch_discussion", return_value=[]) as discussion, \
+             patch.object(Path, "mkdir"), patch.object(Path, "write_text") as write, \
+             patch("builtins.print"):
+            export.main()
+        markdown = write.call_args.args[0]
+        self.assertEqual(re.findall(r"^## (\d+):", markdown, re.MULTILINE), ["1"])
+        discussion.assert_called_once_with("az", "https://dev.azure.com/org", "project", 1)
+        self.assertTrue(export.matches_field_filters({}, []))
+
     def test_optional_html_conversion_preserves_tables_strikes_and_links(self):
         html = (
             '<div style="color:red"><div><br></div><b>Design</b>'

@@ -204,6 +204,88 @@ def sprint_is_excluded(work_item, excluded_sprints):
     return sprint_matches(work_item, excluded_sprints)
 
 
+def validate_filters(filters):
+    if not isinstance(filters, list):
+        raise ValueError("filters must be a JSON array.")
+    unary = {"exists", "not_exists", "is_empty"}
+    operators = unary | {"eq", "ne", "in", "not_in", "contains"}
+    for index, rule in enumerate(filters):
+        prefix = f"filters[{index}]"
+        if not isinstance(rule, dict):
+            raise ValueError(f"{prefix} must be an object.")
+        if set(rule) - {"field", "operator", "value", "case_sensitive"}:
+            raise ValueError(f"{prefix} contains unknown options.")
+        if not isinstance(rule.get("field"), str) or not rule["field"].strip():
+            raise ValueError(f"{prefix}.field must be a nonempty field reference name.")
+        operator = rule.get("operator")
+        if not isinstance(operator, str) or operator not in operators:
+            raise ValueError(f"{prefix}.operator must be one of: {', '.join(sorted(operators))}.")
+        if not isinstance(rule.get("case_sensitive", False), bool):
+            raise ValueError(f"{prefix}.case_sensitive must be a boolean.")
+        if operator in unary:
+            if "value" in rule:
+                raise ValueError(f"{prefix}: {operator} does not accept value.")
+            continue
+        if "value" not in rule:
+            raise ValueError(f"{prefix}.value is required for {operator}.")
+        value = rule["value"]
+        if operator == "contains":
+            if not isinstance(value, str):
+                raise ValueError(f"{prefix}.value must be a string for contains.")
+        elif operator in {"in", "not_in"}:
+            if not isinstance(value, list) or not value:
+                raise ValueError(f"{prefix}.value must be a nonempty array for {operator}.")
+            if any(entry is not None and not isinstance(entry, (str, int, float, bool)) for entry in value):
+                raise ValueError(f"{prefix}.value entries must be strings, numbers, booleans or null.")
+        elif value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ValueError(f"{prefix}.value must be a string, number, boolean or null.")
+    return filters
+
+
+def field_values_equal(actual, expected, case_sensitive=False):
+    if isinstance(actual, str) and isinstance(expected, str):
+        return actual == expected if case_sensitive else actual.casefold() == expected.casefold()
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return type(actual) is type(expected) and actual == expected
+    return actual == expected
+
+
+def matches_field_filter(fields, rule):
+    name = rule["field"].strip()
+    operator = rule["operator"]
+    present = name in fields
+    actual = fields.get(name)
+    if operator == "exists":
+        return present
+    if operator == "not_exists":
+        return not present
+    if operator == "is_empty":
+        return not present or actual is None or (isinstance(actual, str) and not actual.strip())
+    if not present:
+        return False
+    # Identity fields use the same uniqueName shown in the export.
+    if isinstance(actual, dict) and "uniqueName" in actual:
+        actual = actual["uniqueName"]
+    if isinstance(actual, (dict, list)):
+        return False
+    expected = rule["value"]
+    case_sensitive = rule.get("case_sensitive", False)
+    if operator == "contains":
+        if not isinstance(actual, str):
+            return False
+        return expected in actual if case_sensitive else expected.casefold() in actual.casefold()
+    if operator in {"in", "not_in"}:
+        matched = any(field_values_equal(actual, entry, case_sensitive) for entry in expected)
+        return matched if operator == "in" else not matched
+    matched = field_values_equal(actual, expected, case_sensitive)
+    return matched if operator == "eq" else not matched
+
+
+def matches_field_filters(work_item, filters):
+    fields = work_item.get("fields", {})
+    return all(matches_field_filter(fields, rule) for rule in filters)
+
+
 def fetch_work_item_ids(az_command, org_url, project, work_item_type):
     work_item_ids = []
     last_id = 0
@@ -456,6 +538,7 @@ def main():
     get_text_formatter(convert_html_to_markdown)
     excluded_sprints = parse_excluded_sprints(config.get("exclude_sprints", ""))
     included_sprints = parse_sprints(config.get("include_sprints", ""), "include_sprints")
+    filters = validate_filters(config.get("filters", []))
     output_filename = Path(config["output_file"]).name
     output_file = Path(__file__).with_name("out") / output_filename
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -496,6 +579,10 @@ def main():
             item for item in work_items if not sprint_is_excluded(item, excluded_sprints)
         ]
         print(f"Excluded {previous_count - len(work_items)} work items by sprint.")
+
+    if filters:
+        work_items = [item for item in work_items if matches_field_filters(item, filters)]
+        print(f"Matched {len(work_items)} work items with field filters.")
 
     output = []
     for work_item in work_items:
