@@ -327,7 +327,74 @@ def build_field_lines(fields):
     return [f"- **{name}:** {format_field_value(value)}" for name, value in sorted(fields.items())]
 
 
-def build_markdown_output(items):
+def get_text_formatter(convert_html_to_markdown=False):
+    if not isinstance(convert_html_to_markdown, bool):
+        raise ValueError("convert_html_to_markdown must be a boolean (true or false).")
+    if not convert_html_to_markdown:
+        return str
+
+    try:
+        from bs4 import BeautifulSoup
+        from markdownify import MarkdownConverter
+    except ImportError as error:
+        requirements = Path(__file__).with_name("requirements.txt")
+        raise RuntimeError(
+            "HTML conversion requires markdownify. Install it with: "
+            f'python -m pip install -r "{requirements}"'
+        ) from error
+
+    class AdoMarkdownConverter(MarkdownConverter):
+        def convert_li(self, element, text, parent_tags):
+            rendered = super().convert_li(element, text, parent_tags)
+            # A table needs its own line to render inside a Markdown list item.
+            if text.lstrip().startswith("|"):
+                rendered = re.sub(
+                    r"^(\d+\.|-) (\|)",
+                    lambda match: match[1] + "\n\n" + " " * (len(match[1]) + 1) + "|",
+                    rendered,
+                )
+            return rendered
+
+    def format_html(value):
+        text = str(value)
+        # Leave plain text and existing Markdown untouched.
+        if not re.search(
+            r"</?(?:div|p|span|br|b|strong|i|em|s|del|strike|a|img|ul|ol|li|"
+            r"table|thead|tbody|tr|th|td|blockquote|pre|code|h[1-6]|hr)\b[^>]*>",
+            text, re.IGNORECASE,
+        ):
+            return text
+        soup = BeautifulSoup(text, "html.parser")
+        for element in soup.find_all(["script", "style"]):
+            element.decompose()
+        for node in soup.find_all(string=True):
+            if "\xa0" in node and not node.find_parent(["pre", "code"]):
+                node.replace_with(str(node).replace("\xa0", " "))
+        # ADO's pasted HTML sometimes places a nested list next to its parent item.
+        for nested in soup.select("ol > ol, ol > ul, ul > ol, ul > ul"):
+            previous = nested.find_previous_sibling()
+            if previous is not None and previous.name == "li":
+                previous.append(nested.extract())
+        for element in reversed(soup.find_all(["div", "span", "p"])):
+            if element.find_parent(["pre", "code"]):
+                continue
+            if not element.get_text(strip=True) and not element.find(
+                ["img", "table", "hr", "pre", "code", "a"]
+            ):
+                if element.name == "span":
+                    element.unwrap()
+                else:
+                    element.decompose()
+        return AdoMarkdownConverter(
+            heading_style="ATX", bullets="-", table_infer_header=True,
+            keep_inline_images_in=["td", "th"], wrap=False,
+        ).convert_soup(soup).strip()
+
+    return format_html
+
+
+def build_markdown_output(items, convert_html_to_markdown=False):
+    format_text = get_text_formatter(convert_html_to_markdown)
     lines = ["# Azure DevOps Work Items", ""]
 
     for item in items:
@@ -353,7 +420,9 @@ def build_markdown_output(items):
         ):
             value = item.get(field)
             if value:
-                lines.extend([f"### {heading}", "", str(value), ""])
+                text = format_text(value)
+                if text:
+                    lines.extend([f"### {heading}", "", text, ""])
 
         discussions = item.get("discussion", [])
         if discussions:
@@ -365,7 +434,7 @@ def build_markdown_output(items):
                 lines.extend([
                     f"#### {author} ({date})",
                     "",
-                    text,
+                    format_text(text),
                     "",
                 ])
 
@@ -382,6 +451,9 @@ def main():
         args.title_filter if args.title_filter is not None else config.get("title_filter", "")
     )
     include_discussions = config.get("include_discussions", False)
+    convert_html_to_markdown = config.get("convert_html_to_markdown", False)
+    # Validate the option and dependency before making Azure DevOps requests.
+    get_text_formatter(convert_html_to_markdown)
     excluded_sprints = parse_excluded_sprints(config.get("exclude_sprints", ""))
     included_sprints = parse_sprints(config.get("include_sprints", ""), "include_sprints")
     output_filename = Path(config["output_file"]).name
@@ -442,7 +514,10 @@ def main():
 
         output.append(output_item)
 
-    output_file.write_text(build_markdown_output(output), encoding="utf-8")
+    output_file.write_text(
+        build_markdown_output(output, convert_html_to_markdown=convert_html_to_markdown),
+        encoding="utf-8",
+    )
 
     print(f"Done: {output_file}")
 

@@ -13,6 +13,71 @@ spec.loader.exec_module(export)
 
 
 class ExportTests(unittest.TestCase):
+    def test_optional_html_conversion_preserves_tables_strikes_and_links(self):
+        html = (
+            '<div style="color:red"><div><br></div><b>Design</b>'
+            '<p>Oracle<span>&nbsp;</span>can consume data.</p>'
+            '<ol><li>Parent</li><ol><li><table>'
+            '<tr><td>Name</td><td>Type</td></tr>'
+            '<tr><td><s>Created_By</s></td><td>varchar</td></tr>'
+            '</table></li></ol><li>Next</li></ol>'
+            '<p><a href="https://example.com/spec">Specification</a></p></div>'
+        )
+        item = dict(id=1, title="Task", description=html, acceptanceCriteria=html,
+                    comments=html, discussion=[dict(addedBy="Ana", discussion=html)])
+        original = json.loads(json.dumps(item))
+        raw = export.build_markdown_output([item])
+        self.assertEqual(raw.count(html), 4)
+        self.assertEqual(export.build_markdown_output([item], False), raw)
+        converted = export.build_markdown_output([item], True)
+        for expected in ["**Design**", "Oracle can consume data.",
+                         "| Name | Type |", "| --- | --- |", "~~Created\\_By~~",
+                         "[Specification](https://example.com/spec)", "2. Next"]:
+            self.assertEqual(converted.count(expected), 4)
+        self.assertNotIn("<div", converted)
+        self.assertNotIn("color:red", converted)
+        self.assertNotIn("1. |", converted)
+        self.assertEqual(item, original)
+
+    def test_plain_text_and_code_spacing_survive_conversion(self):
+        formatter = export.get_text_formatter(True)
+        plain = "Existing **Markdown** and code `a_b`\n\n3 < 5 and 7 > 6"
+        self.assertEqual(formatter(plain), plain)
+        code = formatter('<pre>first\n\n\n    second</pre>')
+        self.assertIn('first\n\n\n    second', code)
+        self.assertEqual(formatter('<div><span>&nbsp;</span><br></div>'), '')
+
+    def test_html_conversion_dependency_is_optional(self):
+        with patch.dict("sys.modules", {"markdownify": None}):
+            self.assertEqual(export.get_text_formatter(False)("<b>Text</b>"), "<b>Text</b>")
+            with self.assertRaisesRegex(RuntimeError, "pip install -r"):
+                export.get_text_formatter(True)
+
+    def test_html_conversion_config_is_applied_and_validated_before_requests(self):
+        for option in [None, False, True, "true", 1]:
+            config = dict(organization="org", project="project", work_item_type="Task",
+                          output_file="test.md")
+            if option is not None:
+                config["convert_html_to_markdown"] = option
+            item = {"id": 1, "fields": {"System.Description": "<b>Example</b>"}}
+            with self.subTest(option=option), \
+                 patch("sys.argv", ["export_us.py"]), \
+                 patch.object(export, "load_config", return_value=config), \
+                 patch.object(export, "get_az_command", return_value="az") as az, \
+                 patch.object(export, "fetch_work_item_ids", return_value=[1]), \
+                 patch.object(export, "fetch_work_items", return_value=[item]), \
+                 patch.object(Path, "mkdir"), patch.object(Path, "write_text") as write, \
+                 patch("builtins.print"):
+                if option is not None and not isinstance(option, bool):
+                    with self.assertRaisesRegex(ValueError, "convert_html_to_markdown"):
+                        export.main()
+                    az.assert_not_called()
+                    write.assert_not_called()
+                else:
+                    export.main()
+                    expected = "**Example**" if option else "<b>Example</b>"
+                    self.assertIn(expected, write.call_args.args[0])
+
     def test_all_fields_are_always_requested_and_rendered_below_title(self):
         items = [
             {"id": 1, "fields": {

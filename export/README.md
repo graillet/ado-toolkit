@@ -8,7 +8,7 @@ El script solo consulta Azure DevOps; el resultado se guarda localmente.
 
 ## Requisitos
 
-- Python 3.8 o posterior. Solo utiliza módulos de la biblioteca estándar; no requiere instalar paquetes con `pip`.
+- Python 3.8 o posterior. La conversión opcional de HTML requiere las dependencias de `export/requirements.txt`; con la conversión desactivada basta la biblioteca estándar.
 - Azure CLI disponible en `PATH` como `az` o `az.cmd`, con la extensión `azure-devops` instalada.
 - Autenticación de Azure CLI preparada para Azure DevOps y permisos de lectura sobre el proyecto y sus elementos de trabajo. El script usa las credenciales disponibles para la CLI; no inicia sesión ni solicita credenciales.
 - Permisos locales para crear archivos temporales y escribir en `export/out/`.
@@ -20,6 +20,16 @@ python --version
 az --version
 az devops --help
 ```
+
+Para habilitar la conversión de HTML, instala las dependencias desde la raíz del repositorio. En PowerShell puedes usar un entorno virtual local:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r export/requirements.txt
+.\.venv\Scripts\python.exe export/export_us.py
+```
+
+Usa ese mismo intérprete para ejecutar el exportador y las pruebas. Si ya tienes un entorno activo, basta con `python -m pip install -r export/requirements.txt`.
 
 ## Configuración
 
@@ -35,6 +45,7 @@ Ejemplo para exportar historias de usuario:
   "title_filter": "",
   "exclude_sprints": "Inactive|Sprint 1|Sprint 2",
   "include_discussions": false,
+  "convert_html_to_markdown": false,
   "output_file": "BBU_RISE_US.md"
 }
 ```
@@ -48,8 +59,21 @@ Ejemplo para exportar historias de usuario:
 | `title_filter` | No | Expresión regular para buscar en el título, sin distinguir mayúsculas. Ausente o `""` incluye todos los títulos. |
 | `exclude_sprints` | No | Cadena de nombres de sprint separados por `\|`. Ausente o `""` no excluye ninguno. No acepta un arreglo JSON ni `null`. |
 | `include_discussions` | No | Booleano `true` o `false`. Si se omite, se usa `false`. Activa la consulta del historial de discusiones de los elementos que pasan los filtros. |
+| `convert_html_to_markdown` | No | Booleano `true` o `false`. Por defecto `false`. Convierte Description, Acceptance criteria, Comments y Discussion a Markdown con `markdownify`. |
 
 Usa booleanos JSON sin comillas y evita comas finales o comentarios en el archivo.
+
+### Convertir HTML a Markdown
+
+```json
+"convert_html_to_markdown": true
+```
+
+Elimina estilos de presentación y contenedores vacíos, conservando texto, listas, enlaces, tablas y tachados (`<s>`, `<del>` y `<strike>` se convierten en `~~texto~~`). En tablas sin encabezados HTML explícitos se utiliza la primera fila como encabezado. También corrige listas anidadas pegadas desde ADO y conserva los espacios entre palabras y los bloques de código.
+
+Se aplica al generar Description, Acceptance criteria, Comments y las entradas de Discussion. Los textos sin etiquetas HTML se conservan tal cual, y las viñetas de otros campos mantienen su formato. Los valores descargados no se modifican. Con `false` o si se omite, se conserva el HTML original y no se necesita instalar `markdownify`. Valores como `"true"` entre comillas o `null` son inválidos.
+
+Markdown no conserva colores, fuentes ni toda la disposición visual de HTML; las tablas con celdas combinadas o estructuras complejas pueden requerir revisión. Los enlaces de imágenes se conservan, pero las imágenes no se descargan. La conversión tampoco activa la consulta de discusiones: eso depende de `include_discussions`.
 
 ### Campos exportados
 
@@ -156,7 +180,7 @@ Cada elemento incluye:
 - Descripción, criterios de aceptación y el campo `Microsoft.VSTS.CMMI.Comments`, si tienen contenido.
 - Discusiones con autor y fecha, cuando están habilitadas y se encuentran entradas en el historial.
 
-Los campos de texto se copian tal como los devuelve Azure DevOps. No se convierte el HTML a Markdown ni se descargan archivos adjuntos o imágenes. El campo `Comments` y la sección `Discussion` provienen de fuentes distintas: desactivar discusiones no elimina el campo `Comments`.
+Los campos de texto conservan el HTML original salvo que se active `convert_html_to_markdown`. No se descargan archivos adjuntos ni imágenes. El campo `Comments` y la sección `Discussion` provienen de fuentes distintas: desactivar discusiones no elimina el campo `Comments`.
 
 Si no hay coincidencias, se genera un archivo que contiene únicamente el encabezado general.
 
@@ -194,7 +218,7 @@ Si una consulta falla antes de la escritura final, un archivo de salida de una e
 Desde la raíz del repositorio:
 
 ```powershell
-python -B -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
 Las pruebas usan respuestas simuladas y no requieren conectarse a Azure DevOps. Cubren paginación, limpieza de archivos temporales, detección de elementos omitidos, prioridad del filtro de consola y exclusión de sprints.
