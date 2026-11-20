@@ -1,11 +1,18 @@
 import argparse
 import json
+import logging
 import re
 import shutil
 import subprocess
 import tempfile
+import sys
+import threading
+import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
+
+LOGGER = logging.getLogger("ado_export")
 
 CONFIG_FILE = Path(__file__).with_name("config.json")
 WORK_ITEM_QUERY_PAGE_SIZE = 1000
@@ -40,18 +47,39 @@ def load_config(config_file=CONFIG_FILE):
 
 
 def run_az(command):
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace"
-    )
+    # Log only the operation, never command arguments or response bodies.
+    operation = command[command.index("--resource") + 1] if "--resource" in command else "Azure CLI"
+    started = time.monotonic()
+    stopped = threading.Event()
 
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr)
+    def report_wait():
+        while not stopped.wait(15):
+            LOGGER.info("Esperando respuesta de Azure: %s (%.0f s).", operation, time.monotonic() - started)
 
-    return json.loads(result.stdout)
+    LOGGER.info("Iniciando consulta Azure: %s.", operation)
+    reporter = threading.Thread(target=report_wait, daemon=True)
+    reporter.start()
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Azure CLI fallo ({operation}, codigo {result.returncode}): {result.stderr}\n"
+                "Verifica la sesion con az login (o az devops login --organization URL), "
+                "la extension azure-devops, la red y los permisos del proyecto."
+            )
+        response = json.loads(result.stdout)
+        LOGGER.info("Consulta completada: %s (%.1f s).", operation, time.monotonic() - started)
+        return response
+    finally:
+        stopped.set()
+        reporter.join()
 
 
 def get_az_command():
@@ -71,7 +99,8 @@ def chunked(items, size):
 def fetch_work_items(az_command, org_url, project, work_item_ids):
     work_items = []
 
-    for work_item_id_chunk in chunked(work_item_ids, 200):
+    for batch_number, work_item_id_chunk in enumerate(chunked(work_item_ids, 200), 1):
+        LOGGER.info("Descargando lote %s/%s (%s elementos).", batch_number, (len(work_item_ids) + 199) // 200, len(work_item_id_chunk))
         request = {
             "ids": work_item_id_chunk,
             "errorPolicy": "Omit",
@@ -125,6 +154,7 @@ def fetch_discussion(az_command, org_url, project, work_item_id):
     skip = 0
 
     while True:
+        LOGGER.info("Discusion del elemento %s: pagina %s.", work_item_id, skip // WORK_ITEM_UPDATES_PAGE_SIZE + 1)
         command = [
             az_command, "devops", "invoke",
             "--org", org_url,
@@ -166,7 +196,7 @@ def get_assigned_to(fields):
     assigned_to = fields.get("System.AssignedTo")
 
     if isinstance(assigned_to, dict):
-        return assigned_to.get("displayName")
+        return assigned_to.get("uniqueName") or assigned_to.get("displayName")
 
     return assigned_to
 
@@ -291,6 +321,7 @@ def fetch_work_item_ids(az_command, org_url, project, work_item_type):
     last_id = 0
 
     while True:
+        LOGGER.info("Consultando IDs: %s acumulados; despues del ID %s.", len(work_item_ids), last_id)
         wiql = (
             "SELECT [System.Id] "
             "FROM WorkItems "
@@ -325,6 +356,7 @@ def fetch_work_item_ids(az_command, org_url, project, work_item_type):
             request_file.unlink(missing_ok=True)
 
         items = response["workItems"]
+        LOGGER.info("Pagina recibida: %s IDs.", len(items))
 
         if not items:
             break
@@ -523,8 +555,8 @@ def build_markdown_output(items, convert_html_to_markdown=False):
     return "\n".join(lines)
 
 
-def main():
-    args = build_parser().parse_args()
+def export_work_items(args):
+    LOGGER.info("Leyendo configuracion: %s", CONFIG_FILE)
     config = load_config()
     organization = config["organization"]
     project = config["project"]
@@ -539,13 +571,18 @@ def main():
     excluded_sprints = parse_excluded_sprints(config.get("exclude_sprints", ""))
     included_sprints = parse_sprints(config.get("include_sprints", ""), "include_sprints")
     filters = validate_filters(config.get("filters", []))
-    output_filename = Path(config["output_file"]).name
-    output_file = Path(__file__).with_name("out") / output_filename
+    output_file = Path(config["output_file"])
+    if not output_file.is_absolute():
+        output_file = Path(__file__).with_name("out") / output_file
     output_file.parent.mkdir(parents=True, exist_ok=True)
     org_url = f"https://dev.azure.com/{organization}"
+    LOGGER.info("Buscando Azure CLI en PATH.")
     az_command = get_az_command()
+    LOGGER.info("Azure CLI: %s", az_command)
+    LOGGER.info("Destino: organizacion=%s; proyecto=%s.", organization, project)
+    LOGGER.info("Se usan las credenciales existentes; este script no solicita credenciales. Si falta sesion, ejecuta az login antes de exportar.")
 
-    print(f"Getting work items of type {work_item_type}...")
+    LOGGER.info(f"Getting work items of type {work_item_type}...")
 
     work_item_ids = fetch_work_item_ids(
         az_command,
@@ -553,7 +590,7 @@ def main():
         project,
         work_item_type
     )
-    print(f"Exporting {len(work_item_ids)} work items...")
+    LOGGER.info(f"Exporting {len(work_item_ids)} work items...")
 
     work_items = fetch_work_items(
         az_command, org_url, project, work_item_ids
@@ -565,24 +602,24 @@ def main():
     ]
 
     if title_filter:
-        print(f"Matched {len(work_items)} work items with title filter {title_filter!r}.")
+        LOGGER.info(f"Matched {len(work_items)} work items with title filter {title_filter!r}.")
 
     if included_sprints:
         work_items = [
             item for item in work_items if sprint_matches(item, included_sprints)
         ]
-        print(f"Matched {len(work_items)} work items with included sprints.")
+        LOGGER.info(f"Matched {len(work_items)} work items with included sprints.")
 
     if excluded_sprints:
         previous_count = len(work_items)
         work_items = [
             item for item in work_items if not sprint_is_excluded(item, excluded_sprints)
         ]
-        print(f"Excluded {previous_count - len(work_items)} work items by sprint.")
+        LOGGER.info(f"Excluded {previous_count - len(work_items)} work items by sprint.")
 
     if filters:
         work_items = [item for item in work_items if matches_field_filters(item, filters)]
-        print(f"Matched {len(work_items)} work items with field filters.")
+        LOGGER.info(f"Matched {len(work_items)} work items with field filters.")
 
     output = []
     for work_item in work_items:
@@ -591,7 +628,7 @@ def main():
         )
 
         if include_discussions:
-            print(f"Exporting discussion for work item {work_item['id']}...")
+            LOGGER.info(f"Exporting discussion for work item {work_item['id']}...")
             output_item["discussion"] = fetch_discussion(
                 az_command,
                 org_url,
@@ -601,12 +638,46 @@ def main():
 
         output.append(output_item)
 
+    LOGGER.info("Generando Markdown para %s elementos y guardando en %s.", len(output), output_file)
     output_file.write_text(
         build_markdown_output(output, convert_html_to_markdown=convert_html_to_markdown),
         encoding="utf-8",
     )
 
-    print(f"Done: {output_file}")
+    LOGGER.info(f"Done: {output_file}")
+
+
+def main():
+    args = build_parser().parse_args()
+    log_dir = Path(__file__).with_name("out") / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / ("export_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f") + ".log")
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    handlers = [logging.StreamHandler(sys.stdout)]
+    previous_level, previous_propagate = LOGGER.level, LOGGER.propagate
+    started = time.monotonic()
+    try:
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        for handler in handlers:
+            handler.setFormatter(formatter)
+            LOGGER.addHandler(handler)
+        LOGGER.setLevel(logging.INFO)
+        LOGGER.propagate = False
+        LOGGER.info("Inicio de exportacion. Bitacora: %s", log_file)
+        export_work_items(args)
+        LOGGER.info("Exportacion completada en %.1f s.", time.monotonic() - started)
+    except KeyboardInterrupt:
+        LOGGER.warning("Exportacion cancelada por el usuario.")
+        raise
+    except Exception:
+        LOGGER.exception("La exportacion fallo despues de %.1f s.", time.monotonic() - started)
+        raise
+    finally:
+        for handler in handlers:
+            LOGGER.removeHandler(handler)
+            handler.close()
+        LOGGER.setLevel(previous_level)
+        LOGGER.propagate = previous_propagate
 
 
 if __name__ == "__main__":

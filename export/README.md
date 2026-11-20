@@ -21,6 +21,19 @@ az --version
 az devops --help
 ```
 
+### Preparar Azure DevOps e iniciar sesión
+
+Después de instalar Azure CLI, ejecuta estos comandos en PowerShell con el mismo usuario de Windows que ejecutará el exportador:
+
+```powershell
+az extension add --name azure-devops
+az login
+```
+
+Completa el inicio de sesión con la cuenta que tiene acceso al proyecto de Azure DevOps. Hazlo antes de ejecutar `export_us.py`: el script usa las credenciales existentes y **no abre el inicio de sesión ni solicita credenciales**. En una máquina nueva, cada compañero debe preparar su propia sesión. Si la sesión caduca, vuelve a ejecutar `az login`.
+
+### Dependencias opcionales de Python
+
 Para habilitar la conversión de HTML, instala las dependencias desde la raíz del repositorio. En PowerShell puedes usar un entorno virtual local:
 
 ```powershell
@@ -56,7 +69,7 @@ Ejemplo para exportar historias de usuario:
 | `organization` | Sí | Nombre de la organización, sin la URL. El script construye `https://dev.azure.com/<organization>`. |
 | `project` | Sí | Nombre del proyecto de Azure DevOps. |
 | `work_item_type` | Sí | Un único tipo de elemento de trabajo por ejecución. |
-| `output_file` | Sí | Nombre del archivo de salida, preferentemente con extensión `.md`. Se guarda dentro de `out/`, junto al script; solo se utiliza el nombre final de la ruta indicada. |
+| `output_file` | Sí | Nombre o ruta del archivo de salida, preferentemente con extensión `.md`. Una ruta absoluta se respeta; un nombre o ruta relativa se interpreta desde `export/out/`. Las carpetas de destino se crean si no existen. |
 | `title_filter` | No | Expresión regular para buscar en el título, sin distinguir mayúsculas. Ausente o `""` incluye todos los títulos. |
 | `exclude_sprints` | No | Cadena de nombres de sprint separados por `\|`. Ausente o `""` no excluye ninguno. No acepta un arreglo JSON ni `null`. |
 | `include_discussions` | No | Booleano `true` o `false`. Si se omite, se usa `false`. Activa la consulta del historial de discusiones de los elementos que pasan los filtros. |
@@ -144,7 +157,7 @@ Los campos se presentan juntos como viñetas debajo del título: primero los hab
 
 No se repiten los campos ya representados en el encabezado o en las secciones de descripción, criterios de aceptación y comentarios. Tampoco hay una sección separada de campos adicionales. `System.History` se excluye siempre de las viñetas; sus entradas se consultan para la sección `Discussion` únicamente cuando `include_discussions` es `true`.
 
-Los objetos con `uniqueName` se muestran solo con ese valor, incluso dentro de listas y objetos anidados. Los objetos sin `uniqueName` y las listas se representan como JSON compacto en la misma viñeta. Los valores `0`, `false`, `null` y las cadenas vacías (`""`) se conservan. Los textos de estos campos se escapan para Markdown y los saltos de línea continúan dentro de la misma viñeta. Assigned to conserva su formato habitual.
+Los objetos con `uniqueName` se muestran solo con ese valor, incluso dentro de listas y objetos anidados. Los objetos sin `uniqueName` y las listas se representan como JSON compacto en la misma viñeta. Los valores `0`, `false`, `null` y las cadenas vacías (`""`) se conservan. Los textos de estos campos se escapan para Markdown y los saltos de línea continúan dentro de la misma viñeta. Assigned to utiliza `uniqueName` (normalmente el correo); si ADO no lo proporciona, conserva `displayName` como alternativa. Los archivos ya generados deben exportarse de nuevo para reflejar este cambio.
 
 Se incluyen los campos presentes en la respuesta de cada item; los items pueden tener campos distintos. Las relaciones y los adjuntos no forman parte de estos campos. El historial de discusiones sigue dependiendo de `include_discussions`. Para actualizar un archivo ya generado, vuelve a ejecutar el exportador.
 
@@ -190,6 +203,8 @@ Un mismo nombre se excluye en todas las ramas de iteración del proyecto. No se 
 
 ## Ejecución
 
+Antes de ejecutar el exportador, completa el [inicio de sesión de Azure CLI](#preparar-azure-devops-e-iniciar-sesión) y revisa `export/config.json`.
+
 Desde la raíz del repositorio:
 
 ```powershell
@@ -222,7 +237,32 @@ Consulta la ayuda con:
 python export/export_us.py --help
 ```
 
+## Bitácora y seguimiento
+
+Cada ejecución muestra el avance en consola y crea una bitácora UTF-8 independiente en `export/out/logs/export_<fecha>_<hora>.log`. Incluye carga de configuración, ubicación de Azure CLI, consultas de IDs, lotes, filtros, discusiones, escritura del Markdown, duración y errores. Mientras una consulta de Azure CLI sigue pendiente, muestra un aviso cada 15 segundos. Los mensajes se escriben inmediatamente en ambos destinos.
+
+El aviso de espera indica que la consulta aún no terminó; no confirma que el servidor está avanzando. No hay un tiempo límite automático: puedes cancelar con `Ctrl+C`. No se registran los cuerpos de las respuestas ni el comando completo; los errores de Azure CLI sí se guardan, por lo que conviene revisar la bitácora antes de compartirla.
+
+El script **no inicia sesión ni pide credenciales**; ejecuta Azure CLI sin entrada interactiva. Antes de exportar en una máquina nueva, prepara la sesión en la misma cuenta de Windows:
+
+```powershell
+az extension add --name azure-devops
+az login
+```
+
+Si tu organización utiliza autenticación con PAT, puedes preparar la sesión mediante `az devops login --organization https://dev.azure.com/<organizacion>` en la terminal, antes de ejecutar el script. No pongas el token en la configuración ni en la bitácora.
+
+Si solo aparece la carpeta `out`, consulta el último mensaje de la consola o la bitácora: permite distinguir una consulta pendiente de un fallo de configuración, autenticación o permisos. Crear la carpeta no confirma que haya conexión con Azure DevOps.
+
 ## Archivo generado
+
+Ejemplos de `output_file`:
+
+- `"reporte.md"`: se guarda en `export/out/reporte.md`.
+- `"reportes/reporte.md"`: se guarda en `export/out/reportes/reporte.md`.
+- `"C:/reportes/reporte.md"`: se guarda en esa ruta absoluta de Windows.
+
+En JSON, usa `/` para las rutas de Windows o escapa cada barra invertida como `\\`. Las bitácoras permanecen en `export/out/logs/`, independientemente del destino del Markdown.
 
 Con el ejemplo anterior, el resultado se guarda en `export/out/BBU_RISE_US.md`. La carpeta se crea si no existe y un archivo con el mismo nombre se sobrescribe al completar la exportación. El formato siempre es Markdown en UTF-8, independientemente de la extensión elegida.
 

@@ -13,6 +13,75 @@ spec.loader.exec_module(export)
 
 
 class ExportTests(unittest.TestCase):
+    def test_output_destination_respects_absolute_and_relative_paths(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for configured, expected in [
+                ("report.md", root / "export" / "out" / "report.md"),
+                ("nested/report.md", root / "export" / "out" / "nested" / "report.md"),
+                (str(root / "external" / "report.md"), root / "external" / "report.md"),
+            ]:
+                with self.subTest(configured=configured):
+                    config = dict(organization="org", project="project", work_item_type="Task", output_file=configured)
+                    with patch.object(export, "__file__", str(root / "export" / "export_us.py")), \
+                         patch.object(export, "load_config", return_value=config), \
+                         patch.object(export, "get_az_command", return_value="az"), \
+                         patch.object(export, "fetch_work_item_ids", return_value=[]):
+                        export.export_work_items(export.build_parser().parse_args([]))
+                    self.assertEqual(expected.read_text(encoding="utf-8"), "# Azure DevOps Work Items\n")
+
+
+    def test_main_writes_failure_to_file_and_console(self):
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            console = io.StringIO()
+            with patch.object(export, "__file__", str(Path(folder) / "export_us.py")), \
+                 patch.object(export.sys, "argv", ["export_us.py"]), \
+                 patch.object(export.sys, "stdout", console), \
+                 patch.object(export, "load_config", side_effect=ValueError("invalid config")):
+                with self.assertRaisesRegex(ValueError, "invalid config"):
+                    export.main()
+            logs = list((Path(folder) / "out" / "logs").glob("*.log"))
+            self.assertEqual(len(logs), 1)
+            content = logs[0].read_text(encoding="utf-8")
+            self.assertIn("invalid config", content)
+            self.assertIn("invalid config", console.getvalue())
+            self.assertIn("Leyendo configuracion", content)
+
+    def test_azure_query_logs_operation_without_response_body(self):
+        with patch.object(export.subprocess, "run") as run, self.assertLogs(export.LOGGER, level="INFO") as logs:
+            run.return_value.returncode = 0
+            run.return_value.stdout = '{"private": "sensitive content"}'
+            result = export.run_az(["az", "devops", "invoke", "--resource", "wiql"])
+        self.assertEqual(result, {"private": "sensitive content"})
+        self.assertIn("wiql", "\n".join(logs.output))
+        self.assertNotIn("sensitive content", "\n".join(logs.output))
+        self.assertEqual(run.call_args.kwargs["stdin"], export.subprocess.DEVNULL)
+
+    def test_azure_failure_explains_authentication_and_keeps_error(self):
+        with patch.object(export.subprocess, "run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stderr = "not authenticated"
+            with self.assertRaisesRegex(RuntimeError, "(?s)not authenticated.*az login"):
+                export.run_az(["az", "devops", "invoke", "--resource", "wiql"])
+
+    def test_waiting_query_reports_progress(self):
+        event_factory = export.threading.Event
+        event = event_factory()
+        original_wait = event.wait
+        event.wait = lambda seconds=None: original_wait(0.001 if seconds == 15 else seconds)
+        def respond(*args, **kwargs):
+            export.time.sleep(0.03)
+            return export.subprocess.CompletedProcess(args[0], 0, stdout="{}")
+        with patch.object(export.threading, "Event", side_effect=[event, event_factory()]), \
+             patch.object(export.subprocess, "run", side_effect=respond), \
+             self.assertLogs(export.LOGGER, level="INFO") as logs:
+            export.run_az(["az"])
+        self.assertIn("Esperando respuesta", "\n".join(logs.output))
+        self.assertTrue(event.is_set())
+
     def test_generic_field_filter_operators_and_types(self):
         fields = {"System.State": "Active", "Custom.Number": 0, "Custom.Flag": False,
                   "Custom.Empty": "  ", "Custom.Null": None,
@@ -74,7 +143,7 @@ class ExportTests(unittest.TestCase):
                  patch.object(export, "load_config", return_value=config), \
                  patch.object(export, "get_az_command") as az, patch.object(Path, "mkdir") as mkdir:
                 with self.assertRaisesRegex(ValueError, "filters"):
-                    export.main()
+                    export.export_work_items(export.build_parser().parse_args())
                 az.assert_not_called()
                 mkdir.assert_not_called()
 
@@ -100,7 +169,7 @@ class ExportTests(unittest.TestCase):
              patch.object(export, "fetch_discussion", return_value=[]) as discussion, \
              patch.object(Path, "mkdir"), patch.object(Path, "write_text") as write, \
              patch("builtins.print"):
-            export.main()
+            export.export_work_items(export.build_parser().parse_args())
         markdown = write.call_args.args[0]
         self.assertEqual(re.findall(r"^## (\d+):", markdown, re.MULTILINE), ["1"])
         discussion.assert_called_once_with("az", "https://dev.azure.com/org", "project", 1)
@@ -163,11 +232,11 @@ class ExportTests(unittest.TestCase):
                  patch("builtins.print"):
                 if option is not None and not isinstance(option, bool):
                     with self.assertRaisesRegex(ValueError, "convert_html_to_markdown"):
-                        export.main()
+                        export.export_work_items(export.build_parser().parse_args())
                     az.assert_not_called()
                     write.assert_not_called()
                 else:
-                    export.main()
+                    export.export_work_items(export.build_parser().parse_args())
                     expected = "**Example**" if option else "<b>Example</b>"
                     self.assertIn(expected, write.call_args.args[0])
 
@@ -205,7 +274,7 @@ class ExportTests(unittest.TestCase):
                  patch.object(export, "fetch_discussion") as discussion, \
                  patch.object(Path, "mkdir"), patch.object(Path, "write_text") as write, \
                  patch("builtins.print"):
-                export.main()
+                export.export_work_items(export.build_parser().parse_args())
             markdown = write.call_args.args[0]
             discussion.assert_not_called()
             self.assertIn("## 1: Task 1", markdown)
@@ -287,7 +356,7 @@ class ExportTests(unittest.TestCase):
              patch.object(export, "fetch_discussion", return_value=[]) as discussion, \
              patch.object(Path, "mkdir"), patch.object(Path, "write_text") as write, \
              patch("builtins.print"):
-            export.main()
+            export.export_work_items(export.build_parser().parse_args())
         markdown = write.call_args.args[0]
         self.assertNotIn("Task 1", markdown)
         self.assertNotIn("Task 2", markdown)
@@ -366,7 +435,7 @@ class ExportTests(unittest.TestCase):
                  patch.object(export, "fetch_work_items", return_value=[item]), \
                  patch.object(Path, "mkdir"), patch.object(Path, "write_text") as write, \
                  patch("builtins.print"):
-                export.main()
+                export.export_work_items(export.build_parser().parse_args())
                 self.assertEqual("Other task" in write.call_args.args[0], included)
 
 
